@@ -246,6 +246,7 @@ def task_start_7():
         from sklearn.model_selection import train_test_split
         import pickle
         import json
+        import gc
         print("✅ Everything imported correctly.")
     except ImportError as e:
         print(f"❌ Error on import: {e}")
@@ -253,6 +254,8 @@ def task_start_7():
 
     os.makedirs("models", exist_ok=True)
     os.makedirs("outputs", exist_ok=True)
+
+    prediction_successful = 0
     
     # Check the GPU
     gpu_devices = tf.config.list_physical_devices('GPU')
@@ -263,7 +266,7 @@ def task_start_7():
         except Exception as e:
             print(f"⚠️ Unable to set memory growth: {e}")
     else:
-        print("ℹ️  GPU unavaible, using CPU")
+        print("⚠️  GPU unavaible, using CPU")
         
         
     # --- 0. Verify the existence of the previous model ---
@@ -298,105 +301,121 @@ def task_start_7():
                 db = client.data0
                 collection = db.review
                 
-                # Get different data for prediction (not the same as training)
-                batch_size = 1000000
-                total_processed = 0
-                pipeline = [
-                    {"$match": {
-                        "text": {"$ne": None},
-                        "stars": {"$ne": 3}  # Remove 3-star reviews
-                    }},
-                    {"$limit": batch_size}, # go throught the batches
-                    {"$project": {"text": 1, "stars": 1}} # which values are interesting to us
-                ]
+                total_count = collection.count_documents({"text": {"$ne": None}, "stars": {"$ne": 3}})
+                print(f"All the rows: {total_count}")
+
+                batch_size = 500000
+                skip = 0
+                all_results = []
                 
-                print("[INFO] Loading new data from MongoDB for prediction...")
-                cursor = collection.aggregate(pipeline)
-                data = list(cursor)
-                df = pd.DataFrame(data)
+                while skip < total_count:
+                    batch_cursor = collection.find(
+                        {"text": {"$ne": None}, "stars" : {"$ne": 3}},
+                        {"text": 1, "stars": 1}
+                    
+                    ).skip(skip).limit(batch_size)
+                    
+                    batch_data = list(batch_cursor)
+                    if len(batch_data) == 0:
+                        break
+                    df = pd.DataFrame(batch_data)
+                    batch_num = skip / batch_size + 1
+                    print(f"Processing batch {skip//batch_size + 1}: {len(df)} records")
+                    
+                    # Prepare data for prediction
+                    texts = df['text'].astype(str).values
+                    true_labels = df['stars'].apply(lambda x: 1 if x > 3 else 0).values
+                
+                    # Tokenize and pad the new data
+                    sequences = tokenizer.texts_to_sequences(texts)
+                    padded_sequences = pad_sequences(sequences, maxlen=max_length, padding='post', truncating='post')
+                
+                    # Make predictions
+                    print("[INFO] Making predictions...")
+                    predictions = model.predict(padded_sequences, batch_size=256, verbose=1)
+                    predicted_binary = (predictions > 0.5).astype(int).flatten()
+
+                    batch_results = pd.DataFrame({
+                        'text': texts,
+                        'true_stars': df['stars'],
+                        'true_sentiment': true_labels,
+                        'predicted_sentiment': predicted_binary,
+                        'correct': predicted_binary == true_labels
+                    })
+                    
+                    all_results.append(batch_results) # append to the final result
+                    
+                    # memory cleanup after one batch
+                    del batch_data, df, texts, true_labels, sequences, padded_sequences, predictions, predicted_binary, batch_results
+                    gc.collect()
+                    
+                    skip += batch_size
+                    
+                    # save the predictions for the current batch
+                    if batch_num % 5 == 0 >= total_count:
+                        if all_results:
+                            final_results = pd.concat(all_results, ignore_index=True)
+                            final_results.to_csv("outputs/predictions_with_existing_model.csv", index=False)
+                            print(f"✅ Checkpoint saved: {len(final_results)} predictions")
+                
                 client.close()
                 
-                print(f"✅ Loaded {len(df)} new reviews for prediction")
+                # connect all the results onto 1 file
+                if all_results:
+                    final_results = pd.concat(all_results, ignore_index=True)     
+                   # accuracy = final_results['correct'].mean()
+                   
+                    # Calculate accuracy on new data
+                    accuracy = np.mean(predicted_binary == true_labels)
+
+                    # total_predictions = len(final_results)
+                    # positive_predictions = final_results['predicted_sentiment'].sum()
+                    # negative_predictions = total_predictions - positive_predictions
+                    
+                    print(f"\n" + "="*60)
+                    print(f"PREDICTION RESULTS WITH EXISTING MODEL:")
+                    print(f"Accuracy on new data: {accuracy * 100:.2f}%")
+                    # print(f"Total predictions: {len(total_predictions)}")
+                    # print(f"Positive predictions: {(positive_predictions)}")
+                    # print(f"Negative predictions: {negative_predictions}")
+                    print("="*60)
+
+                    final_results.to_csv("outputs/predictions_with_existing_model.csv", index=False)
+                    print("✅ Predictions saved to 'outputs/predictions_with_existing_model.csv'")
                 
-                # Prepare data for prediction
-                texts = df['text'].astype(str).values
-                true_labels = df['stars'].apply(lambda x: 1 if x > 3 else 0).values
-                
-                # Tokenize and pad the new data
-                sequences = tokenizer.texts_to_sequences(texts)
-                padded_sequences = pad_sequences(sequences, maxlen=max_length, padding='post', truncating='post')
-                
-                # Make predictions
-                print("[INFO] Making predictions...")
-                predictions = model.predict(padded_sequences, batch_size=256, verbose=1)
-                predicted_binary = (predictions > 0.5).astype(int).flatten()
-                
-                # Calculate accuracy on new data
-                accuracy = np.mean(predicted_binary == true_labels)
-                
-                print(f"\n" + "="*60)
-                print(f"🎯 PREDICTION RESULTS WITH EXISTING MODEL:")
-                print(f"Accuracy on new data: {accuracy * 100:.2f}%")
-                print(f"Total predictions: {len(predicted_binary)}")
-                print(f"Positive predictions: {np.sum(predicted_binary)}")
-                print(f"Negative predictions: {len(predicted_binary) - np.sum(predicted_binary)}")
-                print("="*60)
-                
-                # Save predictions
-                results_df = pd.DataFrame({
-                    'text': texts,
-                    'true_stars': df['stars'],
-                    'true_sentiment': true_labels,
-                    'predicted_sentiment': predicted_binary,
-                    'correct': predicted_binary == true_labels
-                })
-                
-                total_processed += len(df)
-                print("\n\n\n\n\n\n")
-                print(f"="*60 + "Processed {total_processed} documents...")
-                
-                results_df.to_csv("outputs/predictions_with_existing_model.csv", index=False)
-                print("✅ Predictions saved to 'outputs/predictions_with_existing_model.csv'")
-                
-                # Show some examples
-                print("\nSample predictions:")
-                sample_df = results_df.head(10)
-                for idx, row in sample_df.iterrows():
-                    text_preview = row['text'][:60] + "..." if len(row['text']) > 60 else row['text']
-                    true_label = "Positive" if row['true_sentiment'] == 1 else "Negative"
-                    pred_label = "Positive" if row['predicted_sentiment'] == 1 else "Negative"
-                    correct_symbol = "✅" if row['correct'] else "❌"
-                    print(f"{correct_symbol} True: {true_label:8} | Pred: {pred_label:8} | Stars: {row['true_stars']} | Text: {text_preview}")
-                
-                return  # Exit function after prediction
+                    # Show some examples
+                    print("\nSample predictions:")
+                    sample_df = final_results.head(10)
+                    for idx, row in sample_df.iterrows():
+                        text_preview = row['text'][:60] + "..." if len(row['text']) > 60 else row['text']
+                        true_label = "Positive" if row['true_sentiment'] == 1 else "Negative"
+                        pred_label = "Positive" if row['predicted_sentiment'] == 1 else "Negative"
+                        correct_symbol = "✅" if row['correct'] else "❌"
+                        print(f"{correct_symbol} True: {true_label:8} | Pred: {pred_label:8} | Stars: {row['true_stars']} | Text: {text_preview}")
+                    
+                    prediction_successful = 0
+
+                    return  # Exit function after prediction
+                else:
+                    print("❌ No data was processed!")
                 
             except Exception as e:
-                print(f"❌ Error loading prediction data from MongoDB: {e}")
-                # Continue to training if prediction fails
+                print(f"❌ Error loading data from MongoDB: {e}")
+                prediction_successful = 0
         except Exception as e:
             print(f"❌ Error loading existing model: {e}")
             print("Will train a new model...")
     
+    if prediction_successful == 0:
+        print("❌ No existing model found or prediction failed. Training new model...")
     print("❌ No existing model found or loading failed. Training new model...")
    
-   
-    
-    
-    
-
     # --- 1. Loading data directly fromt he MongoDB ---
     print("[INFO] Loading data directly from the MongoDB...")
     try:
         client = MongoClient("mongodb://127.0.0.1:27017/")
         db = client.data0
         collection = db.review
-        
-        # use aggregation for the random pick 
-        # pipeline = [
-        #     {"$match": {"text": {"$ne": None}}},
-        #     {"$sample": {"size": 1000000}}, 
-        #     {"$project": {"text": 1, "stars": 1}}
-        # ]
         
         # take only 4,5 stars - positive, 1,2 stars -negative reviews
         pipeline = [
@@ -448,9 +467,6 @@ def task_start_7():
     max_length = 200
     X_train_pad = pad_sequences(X_train_seq, maxlen=max_length, padding='post', truncating='post')
     X_test_pad = pad_sequences(X_test_seq, maxlen=max_length, padding='post', truncating='post')
-
-    # print(f"Training data shape: {X_train_pad.shape}")
-    # print(f"Testing data shape: {X_test_pad.shape}")
 
     # --- 3. Creating model ---
     def create_tf_model():
