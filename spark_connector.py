@@ -5,8 +5,13 @@ from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, Stri
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import PipelineModel, Pipeline
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-
-
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import pickle, json, gc
+from pymongo import MongoClient
+import pandas as pd
 
 # --- Config ---
 WINDOWS_IP = "127.0.0.1"
@@ -27,10 +32,6 @@ def get_spark_session():
         # fix for java 17
         .config("spark.driver.extraJavaOptions", "--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED")
         .getOrCreate())
-
-
-
-
 
 # --- Helper functions ---
 def read_collection(spark, collection_name):
@@ -231,7 +232,6 @@ def task_start_71(spark):
     print(f"============================================")
     save_output(predictions.select("stars", "prediction"), "research_1_sentiment_predictions")
 
-# --- II. TensorFlow GPU EXPERIMENT (OPTIMIZED FOR 6GB VRAM) ---
 def task_start_7():
     print("\n###### Research: 1. Sentiment Analysis (TensorFlow GPU) - Direct MongoDB ######")
     try:
@@ -241,12 +241,7 @@ def task_start_7():
         from tensorflow.keras.preprocessing.text import Tokenizer
         from tensorflow.keras.preprocessing.sequence import pad_sequences
         import numpy as np
-        from pymongo import MongoClient
-        import pandas as pd
         from sklearn.model_selection import train_test_split
-        import pickle
-        import json
-        import gc
         print("✅ Everything imported correctly.")
     except ImportError as e:
         print(f"❌ Error on import: {e}")
@@ -532,6 +527,95 @@ def task_start_7():
 
 
 
+def task_start_11(spark):
+    print("\n###### Research 5: Anomaly Detection (Statistical & Semantic) ######")
+    
+    # --- Statistical anomalies ---
+    df_bus = read_collection(spark, "business")
+    
+    # definition of the suspicious establishment
+    # Too much reviews but low rating ?
+    # Too little reviews but perfect rating ?
+    
+    suspicious_bad = df_bus.filter((col("review_count") > 500) & (col("stars") < 2.0))
+    suspicious_good = df_bus.filter((col("review_count") < 5) & (col("stars") == 5.0))
+    
+    print(f"   ->Number of popular but bad rated establishments: {suspicious_bad.count()}")
+    print(f"   ->Number of unpopular but good rated establishments: {suspicious_good.count()}")
+    save_output(suspicious_bad, "research_5_statistical_anomalies")
+    
+    print("\n[INFO] Searching reviews which does not corresponds to the rating (TensorFlow)...")
+    
+    model_path = 'models/sentiment_model_tensorflow_gpu.keras'
+    tokenizer_path = 'models/tokenizer.pickle'
+    config_path = 'models/model_config.json'
+    
+    if not os.path.exists(model_path):
+        print("❌Model does not exist, please run the task number 7")
+        return
+    
+    try:
+        # load model
+        model = keras.models.load_model(model_path)
+        with open(tokenizer_path, 'rb') as handle:
+            tokenizer = pickle.load(handle)
+            
+        # load data from mongodb
+        #collection = read_collection(spark, "review")
+        client = MongoClient("mongodb://127.0.0.1:27017/")
+        db = client.data0 
+        collection = db.review
+        
+        pipeline = [
+            {"$match": {"stars": {"$in": [1, 5]}, "text": {"$ne": None}}},
+            {"$sample": {"size": 1000000}},
+            {"$project": {"text": 1, "stars": 1, "business_id": 1}}
+        ]
+        print("   -> Downloading data for the analysis...")
+        df_reviews = pd.DataFrame(list(collection.aggregate(pipeline)))
+        
+        # predictions
+        texts = df_reviews['text'].astype(str).values
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        max_length = config['max_length'] # same as for traingn the model
+        
+        sequences = tokenizer.texts_to_sequences(texts)
+        padded = pad_sequences(sequences, maxlen=max_length, padding='post', truncating='post')
+        
+        preds = model.predict(padded, verbose=0)
+        df_reviews['sentiment_score'] = preds
+        
+        # searching for anomalies
+        anomalies_pos_star_neg_text = df_reviews[ # good rating but model predict negative rating
+            (df_reviews['stars'] == 5) & (df_reviews['sentiment_score'] < 0.2)
+        ]
+        
+        anomalies_neg_star_pos_text = df_reviews[ # bad rating but model predict positive rating
+            (df_reviews['stars'] == 1) & (df_reviews['sentiment_score'] > 0.8)
+        ]
+        
+        print(f"\n   -> Found {len(anomalies_pos_star_neg_text)} anomalies (5* ratings, negative text)")
+        if not anomalies_pos_star_neg_text.empty:
+            print("      Examples:")
+            for txt in anomalies_pos_star_neg_text['text'].head(3):
+                print(f"      - {txt[:80]}...")
+
+        print(f"\n   -> Found {len(anomalies_neg_star_pos_text)} anomalies (1* ratings, positive text)")
+        if not anomalies_neg_star_pos_text.empty:
+            print("      Examples:")
+            for txt in anomalies_neg_star_pos_text['text'].head(3):
+                print(f"      - {txt[:80]}...")
+        
+        # save the results
+        all_anomalies = pd.concat([anomalies_pos_star_neg_text, anomalies_neg_star_pos_text])
+        all_anomalies.to_csv("outputs/research_5_semantic_anomalies.csv", index=False)
+        print("✅ Anomalies saved to the file.")
+    except Exception as e:
+        print(f"❌ Error occured while analyzing: {e}")
+    
+    
+    
 def main():
     spark = get_spark_session()
 
@@ -550,6 +634,7 @@ def main():
     # data science
     elif choice == '71': task_start_71(spark)
     elif choice == '7': task_start_7()
+    elif choice == '11': task_start_11(spark)
 
     elif choice == '0':
         print("Exiting.")
