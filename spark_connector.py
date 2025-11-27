@@ -1,6 +1,6 @@
 import sys, os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
+from pyspark.sql.functions import regexp_replace, when, col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, StringIndexer
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import PipelineModel, Pipeline
@@ -525,7 +525,46 @@ def task_start_7():
         json.dump({'max_length': max_length}, f)
     print("✅ Model configuration saved")
 
+def task_start8(spark):
+    print("\n###### Research 2: Attribute Correlation (WiFi & Parking vs Stars) ######")
 
+    # Pick establishments with wifi attrib and clean it
+    df = read_collection(spark, "business")
+    
+    print("\n[INFO] Analysis of WiFi influence on the rating...")
+    df_wifi = df.select(
+        col("stars"),
+        regexp_replace(col("attributes.WiFi"), "^u'|'$|'", "").alias("wifi_cleaned") # clear the wifi attr of trash
+    ).filter(
+        col("wifi_cleaned").isNotNull() & (col("wifi_cleaned") != "None")
+    )
+    
+    # aggregation
+    wifi_stats = df_wifi.groupBy("wifi_cleaned").agg(
+        round(avg("stars"), 2).alias("avg_rating"),
+        count("stars").alias("count")
+    ).orderBy(desc("avg_rating"))
+    
+    print("   -> Results for WiFi:")
+    wifi_stats.show()
+    save_output(wifi_stats, "research_2_wifi_correlation")
+    
+    print("\n[INFO] Analysis of parking lot...")
+    df_parking = df.filter(col("attributes.BusinessParking").isNotNull())
+    df_parking = df_parking.withColumn("has_lot_parking", # create new col has_lot_parking which will be yes or no based on a lot info
+        when(col("attributes.BusinessParking").contains("'lot': True"), "Yes")
+        .otherwise("No")
+    )
+    
+    # aggregation
+    parking_stats = df_parking.groupBy("has_lot_parking").agg(
+        round(avg("stars"), 2).alias("avg_rating"),
+        count("stars").alias("count")
+    ).orderBy(desc("avg_rating"))
+    
+    print("   -> Results for parking lot:")
+    parking_stats.show()
+    save_output(parking_stats, "research_2_parking_correlation")
 
 def task_start_11(spark):
     print("\n###### Research 5: Anomaly Detection (Statistical & Semantic) ######")
@@ -614,7 +653,7 @@ def task_start_11(spark):
     except Exception as e:
         print(f"❌ Error occured while analyzing: {e}")
     
-    
+ 
     
 def main():
     spark = get_spark_session()
@@ -634,6 +673,7 @@ def main():
     # data science
     elif choice == '71': task_start_71(spark)
     elif choice == '7': task_start_7()
+    elif choice == '8': task_start8(spark)
     elif choice == '11': task_start_11(spark)
 
     elif choice == '0':
