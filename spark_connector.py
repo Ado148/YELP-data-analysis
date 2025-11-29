@@ -1,10 +1,13 @@
 import sys, os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import regexp_replace, when, col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, StringIndexer
+from pyspark.sql.functions import size, regexp_replace, when, col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import PipelineModel, Pipeline
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml.evaluation import RegressionEvaluator
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.preprocessing.text import Tokenizer
@@ -525,7 +528,7 @@ def task_start_7():
         json.dump({'max_length': max_length}, f)
     print("✅ Model configuration saved")
 
-def task_start8(spark):
+def task_start_8(spark):
     print("\n###### Research 2: Attribute Correlation (WiFi & Parking vs Stars) ######")
 
     # Pick establishments with wifi attrib and clean it
@@ -566,6 +569,92 @@ def task_start8(spark):
     parking_stats.show()
     save_output(parking_stats, "research_2_parking_correlation")
 
+def task_start_10(spark):
+    print("\n###### Research 4: Predictive Task (Random Forest - Predicting Fans) ######")
+    
+    # load the data
+    print("[INFO] Loading and preparing data...")
+    df_user = read_collection(spark, "user")
+    
+    # prepare the data
+    df_clean = df_user.select(
+        col("review_count").cast("double"),
+        col("average_stars").cast("double"),
+        col("fans").cast("double").alias("label"),
+        size(split(col("friends"), ",")).alias("friend_count")
+    ).filter(
+        (col("review_count") > 0) & 
+        (col("review_count") <= 500) &  # filtering out extremes
+        col("average_stars").isNotNull() &
+        (col("fans") <= 200)  # filtering out extremes
+    ).dropna()
+    
+    print(f"[DEBUG] Number of rows after filtering: {df_clean.count()}")
+    
+    # vector assembler
+    feature_columns = ["review_count", "average_stars", "friend_count"]
+    assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+    df_ml = assembler.transform(df_clean).select("features", "label")
+    
+    # split
+    df_sampled = df_ml.sample(False, 0.5, seed=42) 
+    print(f"[DEBUG] Počet vzorky: {df_sampled.count()}")
+    
+    (training_data, test_data) = df_sampled.randomSplit([0.8, 0.2], seed=42)
+    
+    # Using cache for saving up memory
+    training_data = training_data.coalesce(4).cache()
+    test_data = test_data.coalesce(2).cache()
+    training_data.count() 
+    test_data.count()     
+    
+    # model training
+    print("[INFO] Training Random Forest Regressor...")
+    rf = RandomForestRegressor(
+        featuresCol="features", 
+        labelCol="label", 
+        numTrees=50,    
+        maxDepth=25, 
+        seed=42
+    )
+    model = rf.fit(training_data)
+    
+    # evaluation
+    print("[INFO] Evaluation...")
+    predictions = model.transform(test_data)
+    
+    evaluator_rmse = RegressionEvaluator(labelCol="label", predictionCol="prediction", metricName="rmse") # average error
+    evaluator_r2 = RegressionEvaluator(labelCol="label", predictionCol="prediction", metricName="r2") # model quality
+    
+    rmse = evaluator_rmse.evaluate(predictions)
+    r2 = evaluator_r2.evaluate(predictions)
+    
+    print("\n" + "="*60)
+    print(f"RESULTS OF RANDOM FOREST (Fans Prediction):")
+    print(f"  RMSE: {rmse:.2f}")
+    print(f"  R2 (model accuracy): {r2:.4f}")
+    print("="*60)
+    
+    print("\nAttribute importance (Feature Importance):")
+    importances = model.featureImportances.toArray()
+    
+    importance_data = []
+    for i, imp in enumerate(importances):
+        name = feature_columns[i]
+        print(f"  {name:15}: {imp:.4f} ({imp*100:.1f}%)")
+        importance_data.append((name, float(imp)))
+    
+    imp_df = spark.createDataFrame(importance_data, ["feature", "importance"])
+    save_output(imp_df, "research_4_feature_importance")
+    
+    predictions.select("label", "prediction").show(5)
+    save_output(predictions.select("label", "prediction"), "research_4_predictions_sample")
+    
+    # clean cache
+    training_data.unpersist()
+    test_data.unpersist()
+        
+    
 def task_start_11(spark):
     print("\n###### Research 5: Anomaly Detection (Statistical & Semantic) ######")
     
@@ -673,7 +762,8 @@ def main():
     # data science
     elif choice == '71': task_start_71(spark)
     elif choice == '7': task_start_7()
-    elif choice == '8': task_start8(spark)
+    elif choice == '8': task_start_8(spark)
+    elif choice == '10': task_start_10(spark)
     elif choice == '11': task_start_11(spark)
 
     elif choice == '0':
