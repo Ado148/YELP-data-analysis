@@ -1,6 +1,6 @@
 import sys, os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import size, regexp_replace, when, col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
+from pyspark.sql.functions import size, length, regexp_replace, when, col, split, explode, desc, round, avg, count, sum, to_timestamp, date_format
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml import PipelineModel, Pipeline
@@ -236,7 +236,7 @@ def task_start_71(spark):
     save_output(predictions.select("stars", "prediction"), "research_1_sentiment_predictions")
 
 def task_start_7():
-    print("\n###### Research: 1. Sentiment Analysis (TensorFlow GPU) - Direct MongoDB ######")
+    print("\n###### Research: 7. Sentiment Analysis (TensorFlow GPU) - Direct MongoDB ######")
     try:
         import tensorflow as tf
         from tensorflow import keras
@@ -529,7 +529,7 @@ def task_start_7():
     print("✅ Model configuration saved")
 
 def task_start_8(spark):
-    print("\n###### Research 2: Attribute Correlation (WiFi & Parking vs Stars) ######")
+    print("\n###### Research 8: Attribute Correlation (WiFi & Parking vs Stars) ######")
 
     # Pick establishments with wifi attrib and clean it
     df = read_collection(spark, "business")
@@ -569,8 +569,40 @@ def task_start_8(spark):
     parking_stats.show()
     save_output(parking_stats, "research_2_parking_correlation")
 
+def task_start_9(spark):
+    print("\n###### Research 9: Hidden Dependencies (Review Length vs Stars) ######")
+
+    df = read_collection(spark, "review")
+    
+    df_clean = df.filter(col("text").isNotNull()) # filter out empty reviews
+    
+    df_len = df_clean.withColumn("review_length", length(col("text"))) # get the length of the review
+    
+    # aggregation based on the stars
+    # get the avg len for each category (1 star, 2 stars ...)
+    result = df_len.groupBy("stars").agg(
+        round(avg("review_length"),2).alias("avg_length"),
+        count("review_id").alias("review_count")
+    ).orderBy("stars")
+    
+    print("[INFO] AVG length of the review based on the stars: ")
+    result.show()
+    save_output(result, "research_3_length_vs_stars")
+    
+    correlation = df_len.stat.corr("stars", "review_length")
+    print(f"\n   -> Linear correlation (Stars vs Length): {correlation:.4f}")
+    
+    print("-" * 50)
+    if abs(correlation) < 0.1:
+        print("[INFO]: Low linear correlation showing that relationship is not rectilinear")
+        print("Check the table above - we are looking for a 'U' shape (long texts on the edges).")
+    else:
+        print("[INFO]: There is a correlation")
+
+        
+    
 def task_start_10(spark):
-    print("\n###### Research 4: Predictive Task (Random Forest - Predicting Fans) ######")
+    print("\n###### Research 10: Predictive Task (Random Forest - Predicting Fans) ######")
     
     # load the data
     print("[INFO] Loading and preparing data...")
@@ -653,10 +685,9 @@ def task_start_10(spark):
     # clean cache
     training_data.unpersist()
     test_data.unpersist()
-        
-    
+            
 def task_start_11(spark):
-    print("\n###### Research 5: Anomaly Detection (Statistical & Semantic) ######")
+    print("\n###### Research 11: Anomaly Detection (Statistical & Semantic) ######")
     
     # --- Statistical anomalies ---
     df_bus = read_collection(spark, "business")
@@ -763,6 +794,7 @@ def main():
     elif choice == '71': task_start_71(spark)
     elif choice == '7': task_start_7()
     elif choice == '8': task_start_8(spark)
+    elif choice == '9': task_start_9(spark)
     elif choice == '10': task_start_10(spark)
     elif choice == '11': task_start_11(spark)
 
