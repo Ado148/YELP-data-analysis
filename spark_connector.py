@@ -470,12 +470,11 @@ def task_start_7():
     def create_tf_model():
         model = keras.Sequential([
             layers.Embedding(20000, 64, input_length=max_length),
-            layers.Bidirectional(layers.LSTM(64, return_sequences=True)), # Bidirectional je silnejší
+            layers.Bidirectional(layers.LSTM(64, return_sequences=True)),
             layers.Dropout(0.3),
             layers.Bidirectional(layers.LSTM(32)),
             layers.Dense(64, activation='relu'),
             layers.Dropout(0.3),
-            # ZMENA: 1 výstupný neurón + sigmoid pre binárnu klasifikáciu
             layers.Dense(1, activation='sigmoid')
         ])
         
@@ -599,8 +598,6 @@ def task_start_9(spark):
     else:
         print("[INFO]: There is a correlation")
 
-        
-    
 def task_start_10(spark):
     print("\n###### Research 10: Predictive Task (Random Forest - Predicting Fans) ######")
     
